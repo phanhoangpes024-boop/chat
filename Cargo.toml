@@ -1,0 +1,17 @@
+[workspace]
+members = [
+    "backend",
+    "shared",
+    "frontend-leptos",
+]
+resolver = "2"
+
+# Dependencies dùng chung (tất cả project đều dùng version giống nhau)
+[workspace.dependencies]
+prost = "0.13"
+prost-types = "0.13"
+prost-build = "0.13"
+bytes = "1.5"
+crc32c = "0.6"
+thiserror = "1.0"
+tokio = { version = "1", features = ["full"] }

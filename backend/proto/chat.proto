@@ -1,0 +1,65 @@
+syntax = "proto3";
+
+package turbochat.v1;
+
+// ============================================================================
+// USER - Thông tin người dùng
+// ============================================================================
+
+message User {
+  fixed64 user_id = 1;
+  string username = 2;
+  bytes avatar_hash = 3;  // SHA-256 của ảnh đại diện (32 bytes)
+}
+
+// ============================================================================
+// MESSAGE - Tin nhắn chính
+// ============================================================================
+
+message Message {
+  fixed64 message_id = 1;      // ID tin nhắn (duy nhất)
+  fixed64 chat_id = 2;         // ID cuộc trò chuyện
+  fixed64 sender_id = 3;       // ID người gửi
+  bytes content = 4;           // Nội dung tin nhắn (binary, tối ưu zero-copy)
+  fixed64 timestamp_us = 5;    // Thời gian gửi (microseconds)
+  fixed32 content_crc = 6;     // Mã kiểm tra CRC32-C
+}
+
+// ============================================================================
+// SYNC - Đồng bộ tin nhắn (Read Path)
+// ============================================================================
+
+// Client yêu cầu lấy tin nhắn mới
+message SyncRequest {
+  fixed64 chat_id = 1;
+  fixed64 after_message_id = 2;  // Lấy tin nhắn sau ID này (cursor)
+  uint32 limit = 3;              // Số lượng tin nhắn tối đa
+}
+
+// Server trả về danh sách tin nhắn
+message SyncResponse {
+  repeated Message messages = 1;
+  fixed64 server_timestamp_us = 2;
+  bool has_more = 3;             // Còn tin nhắn cũ hơn không?
+  fixed32 crc32 = 99;            // Mã kiểm tra toàn bộ response
+}
+
+// ============================================================================
+// SEND - Gửi tin nhắn mới (Write Path)
+// ============================================================================
+
+// Client gửi tin nhắn mới
+message SendRequest {
+  fixed64 chat_id = 1;
+  fixed64 sender_id = 2;
+  bytes content = 3;
+  fixed32 content_crc = 4;       // CRC32-C để server kiểm tra
+}
+
+// Server xác nhận đã nhận tin
+message SendResponse {
+  bool success = 1;
+  fixed64 message_id = 2;        // ID tin nhắn vừa tạo
+  fixed64 timestamp_us = 3;      // Thời gian server ghi nhận
+  string error = 4;              // Thông báo lỗi (nếu có)
+}

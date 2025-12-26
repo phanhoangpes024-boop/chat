@@ -1,0 +1,45 @@
+syntax = "proto3";
+
+package turbochat.v1;
+
+message User {
+  fixed64 user_id = 1;
+  string username = 2;
+  bytes avatar_hash = 3;
+}
+
+message Message {
+  fixed64 message_id = 1;
+  fixed64 chat_id = 2;
+  fixed64 sender_id = 3;
+  bytes content = 4;
+  fixed64 timestamp_us = 5;
+  fixed32 content_crc = 6;
+}
+
+message SyncRequest {
+  fixed64 chat_id = 1;
+  fixed64 after_message_id = 2;
+  uint32 limit = 3;
+}
+
+message SyncResponse {
+  repeated Message messages = 1;
+  fixed64 server_timestamp_us = 2;
+  bool has_more = 3;
+  fixed32 crc32 = 99;
+}
+
+message SendRequest {
+  fixed64 chat_id = 1;
+  fixed64 sender_id = 2;
+  bytes content = 3;
+  fixed32 content_crc = 4;
+}
+
+message SendResponse {
+  bool success = 1;
+  fixed64 message_id = 2;
+  fixed64 timestamp_us = 3;
+  string error = 4;
+}

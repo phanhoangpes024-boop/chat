@@ -1,0 +1,26 @@
+# Rust
+target/
+Cargo.lock
+**/*.rs.bk
+*.pdb
+
+# Frontend build
+frontend-leptos/dist/
+frontend-leptos/.trunk/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Certs (nếu có)
+*.pem
+*.key
