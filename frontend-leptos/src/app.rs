@@ -100,20 +100,65 @@ pub fn App() -> impl IntoView {
         // OnMessage - Nhận Protobuf binary
         {
             let on_message = Closure::wrap(Box::new(move |event: MessageEvent| {
-                if let Ok(array_buffer) = event.data().dyn_into::<js_sys::ArrayBuffer>() {
+                leptos::logging::log!("📨 WebSocket received event");
+                
+                // XỬ LÝ BLOB
+                if let Ok(blob) = event.data().dyn_into::<web_sys::Blob>() {
+                    leptos::logging::log!("📦 Received Blob: {} bytes", blob.size() as usize);
+                    
+                    // Convert Blob → ArrayBuffer → Vec<u8>
+                    let file_reader = web_sys::FileReader::new().unwrap();
+                    let fr_clone = file_reader.clone();
+                    
+                    let onload = Closure::wrap(Box::new(move |_event: web_sys::ProgressEvent| {
+                        if let Ok(array_buffer) = fr_clone.result().unwrap().dyn_into::<js_sys::ArrayBuffer>() {
+                            let uint8_array = js_sys::Uint8Array::new(&array_buffer);
+                            let bytes = uint8_array.to_vec();
+                            
+                            leptos::logging::log!("✅ Converted to {} bytes", bytes.len());
+                            
+                            if let Ok(msg) = turbochat_shared::Message::decode(&bytes[..]) {
+                                let content = String::from_utf8_lossy(&msg.content).to_string();
+                                let time = format_time(msg.timestamp_us);
+                                
+                                leptos::logging::log!("✅ Decoded message: {}", content);
+                                
+                                let message_type = if msg.sender_id == 42 {
+                                    "sent"
+                                } else {
+                                    "received"
+                                };
+                                
+                                let display_msg = DisplayMessage {
+                                    message_type: message_type.to_string(),
+                                    text: content,
+                                    time,
+                                };
+                                
+                                set_messages.update(|msgs| {
+                                    msgs.push(display_msg);
+                                });
+                                
+                                leptos::logging::log!("✅ Message added to UI");
+                            }
+                        }
+                    }) as Box<dyn FnMut(web_sys::ProgressEvent)>);
+                    
+                    file_reader.set_onload(Some(onload.as_ref().unchecked_ref()));
+                    onload.forget();
+                    
+                    let _ = file_reader.read_as_array_buffer(&blob);
+                    
+                } else if let Ok(array_buffer) = event.data().dyn_into::<js_sys::ArrayBuffer>() {
+                    // Fallback cho ArrayBuffer (nếu có)
                     let uint8_array = js_sys::Uint8Array::new(&array_buffer);
                     let bytes = uint8_array.to_vec();
                     
-                    // Decode Protobuf
                     if let Ok(msg) = turbochat_shared::Message::decode(&bytes[..]) {
                         let content = String::from_utf8_lossy(&msg.content).to_string();
                         let time = format_time(msg.timestamp_us);
                         
-                        let message_type = if msg.sender_id == 42 {
-                            "sent"
-                        } else {
-                            "received"
-                        };
+                        let message_type = if msg.sender_id == 42 { "sent" } else { "received" };
                         
                         let display_msg = DisplayMessage {
                             message_type: message_type.to_string(),
@@ -125,6 +170,8 @@ pub fn App() -> impl IntoView {
                             msgs.push(display_msg);
                         });
                     }
+                } else {
+                    leptos::logging::log!("❌ Unknown data type");
                 }
             }) as Box<dyn FnMut(MessageEvent)>);
             
@@ -162,7 +209,7 @@ pub fn App() -> impl IntoView {
         messages.get();
         
         request_animation_frame(move || {
-            if let Some(div) = scrollable_ref.get() {
+            if let Some(div) = scrollable_ref.get_untracked() {
                 div.set_scroll_top(div.scroll_height());
             }
         });
@@ -170,12 +217,13 @@ pub fn App() -> impl IntoView {
 
     // Event handlers
     let send_message = move || {
-        let text = message_input.get();
+        let text = message_input.get_untracked();
         if text.trim().is_empty() {
             return;
         }
 
-        let chat_id = current_chat_id.get();
+        let chat_id = current_chat_id.get_untracked();
+
         
         // Gửi qua WebSocket (Protobuf binary)
         if let Some(ws_wrapper) = ws_ref.get_value() {
@@ -219,7 +267,7 @@ pub fn App() -> impl IntoView {
     };
 
     let on_sync = move |_| {
-        let chat_id = current_chat_id.get();
+        let chat_id = current_chat_id.get_untracked();
         spawn_local(async move {
             if let Ok(msgs) = do_sync(chat_id).await {
                 set_messages.set(msgs);

@@ -12,33 +12,28 @@ use tokio::sync::broadcast;
 use prost::Message as ProstMessage;
 
 use crate::contract::Message as ChatMessage;
-
-// ============================================================================
-// WEBSOCKET STATE
-// ============================================================================
+use crate::sync::MessageRepo;
 
 pub struct WebSocketState {
-    /// Redis connection URL
     pub redis_url: String,
-    
-    /// Broadcast channel (in-memory per instance)
-    pub tx: broadcast::Sender<Vec<u8>>, // Protobuf bytes
+    pub tx: broadcast::Sender<Vec<u8>>,
+    pub repo: Arc<dyn MessageRepo>,
 }
 
 impl WebSocketState {
-    pub async fn new(redis_url: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn new(
+        redis_url: &str,
+        repo: Arc<dyn MessageRepo>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let (tx, _rx) = broadcast::channel(1000);
         
         Ok(Self {
             redis_url: redis_url.to_string(),
             tx,
+            repo,
         })
     }
 }
-
-// ============================================================================
-// WEBSOCKET UPGRADE HANDLER
-// ============================================================================
 
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
@@ -47,36 +42,41 @@ pub async fn ws_handler(
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
-// ============================================================================
-// WEBSOCKET CONNECTION HANDLER
-// ============================================================================
-
 async fn handle_socket(socket: WebSocket, state: Arc<WebSocketState>) {
     let (mut sender, mut receiver) = socket.split();
     
-    // Subscribe to broadcast channel
     let mut rx = state.tx.subscribe();
     
-    // Task 1: Broadcast → Client
     let mut send_task = tokio::spawn(async move {
         while let Ok(bytes) = rx.recv().await {
-            // Gửi Protobuf bytes xuống client
+            eprintln!("📤 Sending {} bytes to client", bytes.len());
             if sender.send(WsMessage::Binary(bytes)).await.is_err() {
+                eprintln!("❌ Failed to send to client");
                 break;
             }
+            eprintln!("✅ Sent to client successfully");
         }
     });
     
-    // Task 2: Client → Redis Pub
     let state_clone = Arc::clone(&state);
     let mut recv_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = receiver.next().await {
             match msg {
                 WsMessage::Binary(data) => {
-                    // Client gửi Protobuf message
                     if let Ok(chat_msg) = ChatMessage::decode(&data[..]) {
-                        // Publish to Redis
-                        let _ = publish_to_redis(&state_clone, &chat_msg).await;
+                        eprintln!("📥 WebSocket received message: id={}", chat_msg.message_id);
+                        
+                        if let Err(e) = state_clone.repo.insert_message(&chat_msg).await {
+                            eprintln!("❌ DB insert failed: {:?}", e);
+                            continue;
+                        }
+                        eprintln!("✅ Message saved to DB");
+                        
+                        if let Err(e) = publish_to_redis(&state_clone, &chat_msg).await {
+                            eprintln!("❌ Redis publish failed: {:?}", e);
+                        } else {
+                            eprintln!("✅ Published to Redis");
+                        }
                     }
                 }
                 WsMessage::Close(_) => break,
@@ -85,16 +85,11 @@ async fn handle_socket(socket: WebSocket, state: Arc<WebSocketState>) {
         }
     });
     
-    // Đợi một task kết thúc
     tokio::select! {
         _ = (&mut send_task) => recv_task.abort(),
         _ = (&mut recv_task) => send_task.abort(),
     }
 }
-
-// ============================================================================
-// REDIS PUB/SUB
-// ============================================================================
 
 async fn publish_to_redis(state: &Arc<WebSocketState>, msg: &ChatMessage) -> Result<(), Box<dyn std::error::Error>> {
     let client = redis::Client::open(state.redis_url.as_str())?;
@@ -103,15 +98,16 @@ async fn publish_to_redis(state: &Arc<WebSocketState>, msg: &ChatMessage) -> Res
     let channel = format!("chat:{}", msg.chat_id);
     let payload = msg.encode_to_vec();
     
+    eprintln!("📮 Publishing to Redis channel '{}' ({} bytes)", channel, payload.len());
+    
     conn.publish::<_, _, ()>(&channel, &payload).await?;
     
     Ok(())
 }
 
-// backend/src/websocket.rs
-
-/// Background task: Subscribe Redis → Broadcast local
 pub async fn redis_subscriber_task(state: Arc<WebSocketState>) {
+    eprintln!("🔄 Starting Redis subscriber task...");
+    
     let client = match redis::Client::open(state.redis_url.as_str()) {
         Ok(c) => c,
         Err(e) => {
@@ -120,10 +116,8 @@ pub async fn redis_subscriber_task(state: Arc<WebSocketState>) {
         }
     };
 
-    // SỬA 1: Lấy connection trước, sau đó gọi into_pubsub()
-    // Thay vì client.get_async_pubsub()
     let mut pubsub = match client.get_async_connection().await {
-        Ok(conn) => conn.into_pubsub(), 
+        Ok(conn) => conn.into_pubsub(),
         Err(e) => {
             eprintln!("❌ Redis connection failed: {}", e);
             return;
@@ -135,19 +129,26 @@ pub async fn redis_subscriber_task(state: Arc<WebSocketState>) {
         return;
     }
 
-    eprintln!("✅ Redis subscriber started");
+    eprintln!("✅ Redis subscriber started - listening on 'chat:*'");
 
     let mut stream = pubsub.on_message();
 
     while let Some(msg) = stream.next().await {
-        // SỬA 2: Chỉ định rõ kiểu dữ liệu mong muốn là Vec<u8> (bytes)
-        // Cú pháp turbofish ::<Vec<u8>> giúp Rust hiểu kiểu dữ liệu
-        let payload: Vec<u8> = match msg.get_payload::<Vec<u8>>() { 
+        let payload: Vec<u8> = match msg.get_payload::<Vec<u8>>() {
             Ok(p) => p,
-            Err(_) => continue,
+            Err(e) => {
+                eprintln!("⚠️ Failed to get payload: {:?}", e);
+                continue;
+            }
         };
 
-        // Broadcast to all local WebSocket clients
-        let _ = state.tx.send(payload);
+        eprintln!("📢 Redis → Broadcasting {} bytes to clients", payload.len());
+        
+        match state.tx.send(payload) {
+            Ok(count) => eprintln!("✅ Broadcasted to {} connected clients", count),
+            Err(e) => eprintln!("❌ Broadcast failed: {:?}", e),
+        }
     }
+    
+    eprintln!("⚠️ Redis subscriber stream ended");
 }

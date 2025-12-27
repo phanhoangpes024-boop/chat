@@ -9,12 +9,6 @@ use tokio::sync::RwLock;
 
 use crate::contract::{ContractError, Message, SyncRequest, SyncResponse, SendRequest, SendResponse};
 
-// ============================================================================
-// TRAIT: Repository Abstraction (For Testing)
-// ============================================================================
-
-/// Repository trait cho việc truy vấn messages
-/// Cho phép mock trong test mà không cần DB thật
 #[axum::async_trait]
 pub trait MessageRepo: Send + Sync {
     async fn fetch_messages(
@@ -24,15 +18,26 @@ pub trait MessageRepo: Send + Sync {
         limit: u32,
     ) -> Result<Vec<Message>, ContractError>;
     
-    /// Insert a new message (Write Path)
     async fn insert_message(&self, message: &Message) -> Result<(), ContractError>;
 }
 
-// ============================================================================
-// MOCK IMPLEMENTATION (For TDD)
-// ============================================================================
+// Blanket impl để Arc<dyn MessageRepo> có thể dùng làm MessageRepo
+#[axum::async_trait]
+impl MessageRepo for Arc<dyn MessageRepo> {
+    async fn fetch_messages(
+        &self,
+        chat_id: u64,
+        after_message_id: u64,
+        limit: u32,
+    ) -> Result<Vec<Message>, ContractError> {
+        (**self).fetch_messages(chat_id, after_message_id, limit).await
+    }
+    
+    async fn insert_message(&self, message: &Message) -> Result<(), ContractError> {
+        (**self).insert_message(message).await
+    }
+}
 
-/// Mock repository - lưu data trong RAM (HashMap)
 pub struct MockRepo {
     messages: Arc<RwLock<Vec<Message>>>,
 }
@@ -44,7 +49,6 @@ impl MockRepo {
         }
     }
 
-    /// Helper để seed test data
     pub async fn seed(&self, msgs: Vec<Message>) {
         let mut store = self.messages.write().await;
         store.extend(msgs);
@@ -62,7 +66,6 @@ impl MessageRepo for MockRepo {
     ) -> Result<Vec<Message>, ContractError> {
         let store = self.messages.read().await;
         
-        // Filter by chat_id, message_id > cursor, limit
         let filtered: Vec<Message> = store
             .iter()
             .filter(|m| m.chat_id == chat_id && m.message_id > after_message_id)
@@ -81,16 +84,10 @@ impl MessageRepo for MockRepo {
     }
 }
 
-// ============================================================================
-// AXUM HANDLER
-// ============================================================================
-
-/// Shared app state
 pub struct AppState<R: MessageRepo> {
     pub repo: R,
 }
 
-/// POST /sync handler (Read Path)
 pub async fn sync_handler<R: MessageRepo + 'static>(
     State(state): State<Arc<AppState<R>>>,
     body: Bytes,
@@ -100,7 +97,6 @@ pub async fn sync_handler<R: MessageRepo + 'static>(
     eprintln!("========================================");
     eprintln!("   Received {} bytes", body.len());
     
-    // STEP 0: Decode Protobuf request
     use prost::Message as ProstMessage;
     let req = SyncRequest::decode(&body[..])
         .map_err(|e| {
@@ -114,7 +110,6 @@ pub async fn sync_handler<R: MessageRepo + 'static>(
     eprintln!("   after_message_id: {}", req.after_message_id);
     eprintln!("   limit: {}", req.limit);
 
-    // STEP 1: Query database
     let messages = state
         .repo
         .fetch_messages(req.chat_id, req.after_message_id, req.limit)
@@ -122,7 +117,6 @@ pub async fn sync_handler<R: MessageRepo + 'static>(
 
     eprintln!("✅ Repository returned {} messages", messages.len());
 
-    // STEP 2: Build response
     let has_more = messages.len() == req.limit as usize;
     let server_ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -136,11 +130,9 @@ pub async fn sync_handler<R: MessageRepo + 'static>(
         crc32: 0,
     };
 
-    // STEP 3: Finalize CRC
     response.finalize();
     eprintln!("✅ Response CRC computed: 0x{:08x}", response.crc32);
 
-    // STEP 4: Serialize to Protobuf
     let encoded = response.encode_to_vec();
     let body = Bytes::from(encoded);
     
@@ -150,20 +142,6 @@ pub async fn sync_handler<R: MessageRepo + 'static>(
     Ok((StatusCode::OK, body).into_response())
 }
 
-// ============================================================================
-// SEND HANDLER (Write Path)
-// ============================================================================
-
-/// POST /send handler - The Gatekeeper
-/// 
-/// INTEGRITY FIRST:
-/// - Verifies CRC32 BEFORE any database operation
-/// - Rejects corrupted data at the gate (400 Bad Request)
-/// - Only chemically pure data enters the system
-/// 
-/// SYSCALL BUDGET:
-/// - 1x DB INSERT query
-/// Total: 1 syscall (within budget)
 pub async fn send_handler<R: MessageRepo + 'static>(
     State(state): State<Arc<AppState<R>>>,
     body: Bytes,
@@ -173,7 +151,6 @@ pub async fn send_handler<R: MessageRepo + 'static>(
     eprintln!("========================================");
     eprintln!("   Received {} bytes", body.len());
     
-    // STEP 0: Decode Protobuf request
     use prost::Message as ProstMessage;
     let req = SendRequest::decode(&body[..])
         .map_err(|e| {
@@ -187,7 +164,6 @@ pub async fn send_handler<R: MessageRepo + 'static>(
     eprintln!("   content_len: {}", req.content.len());
     eprintln!("   client_crc: 0x{:08x}", req.content_crc);
 
-    // STEP 1: THE GATEKEEPER - Verify CRC32 FIRST
     let calculated_crc = crc32c::crc32c(&req.content);
     
     if calculated_crc != req.content_crc {
@@ -212,30 +188,25 @@ pub async fn send_handler<R: MessageRepo + 'static>(
     
     eprintln!("✅ CRC verification passed");
 
-    // STEP 2: Generate message_id and timestamp
     let timestamp_us = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_micros() as u64;
     
-    // NOTE: Simple timestamp as message_id (NOT production-safe for distributed systems)
-    // TODO: Replace with Snowflake/Sonyflake for collision-free IDs
     let message_id = timestamp_us;
     
     eprintln!("   Generated message_id: {}", message_id);
     eprintln!("   timestamp_us: {}", timestamp_us);
 
-    // STEP 3: Create Message struct
     let message = Message {
         message_id,
         chat_id: req.chat_id,
         sender_id: req.sender_id,
-        content: req.content, // Zero-copy (Bytes)
+        content: req.content,
         timestamp_us,
         content_crc: req.content_crc,
     };
 
-    // STEP 4: Insert into database
     match state.repo.insert_message(&message).await {
         Ok(_) => {
             eprintln!("✅ Message inserted successfully");
@@ -267,10 +238,6 @@ pub async fn send_handler<R: MessageRepo + 'static>(
     }
 }
 
-// ============================================================================
-// ERROR HANDLING (No Panics)
-// ============================================================================
-
 pub struct AppError(ContractError);
 
 impl IntoResponse for AppError {
@@ -286,10 +253,6 @@ impl From<ContractError> for AppError {
         AppError(err)
     }
 }
-
-// ============================================================================
-// TESTS
-// ============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -358,7 +321,7 @@ mod tests {
             .with_state(app_state);
 
         let content = Bytes::from_static(b"Test message");
-        let bad_crc = 0xDEADBEEF; // Wrong CRC
+        let bad_crc = 0xDEADBEEF;
 
         let request = SendRequest {
             chat_id: 100,
@@ -380,7 +343,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Should reject with 400 Bad Request
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

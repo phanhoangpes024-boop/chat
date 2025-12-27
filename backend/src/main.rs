@@ -22,44 +22,37 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
         .parse::<bool>()
         .unwrap_or(false);
     
-    // ========================================================================
-    // SETUP WEBSOCKET (Redis Pub/Sub)
-    // ========================================================================
-    
     let redis_url = "redis://127.0.0.1:6379";
-    
-    println!("🔗 Setting up WebSocket + Redis...");
-    let ws_state = Arc::new(
-        websocket::WebSocketState::new(redis_url)
-            .await
-            .map_err(|e| format!("WebSocket state failed: {}", e))?
-    );
-    
-    // Start Redis subscriber (background task)
-    let ws_state_clone = Arc::clone(&ws_state);
-    tokio::spawn(async move {
-        websocket::redis_subscriber_task(ws_state_clone).await;
-    });
-    
-    println!("✅ WebSocket + Redis ready");
-    
-    // ========================================================================
-    // SETUP DATABASE
-    // ========================================================================
     
     if use_mock {
         println!("📦 MockRepo (In-Memory)");
-        let repo = sync::MockRepo::new();
-        let state = Arc::new(sync::AppState { repo });
+        let repo_concrete = Arc::new(sync::MockRepo::new());
+        let repo_dyn: Arc<dyn sync::MessageRepo> = repo_concrete;
+        
+        println!("🔗 Setting up WebSocket + Redis...");
+        let ws_state = Arc::new(
+            websocket::WebSocketState::new(redis_url, repo_dyn.clone())
+                .await
+                .map_err(|e| format!("WebSocket state failed: {}", e))?
+        );
+        
+        let ws_state_clone = Arc::clone(&ws_state);
+        tokio::spawn(async move {
+            websocket::redis_subscriber_task(ws_state_clone).await;
+        });
+        
+        println!("✅ WebSocket + Redis ready");
+        
+        let state = Arc::new(sync::AppState { repo: repo_dyn });
         start_server(state, ws_state).await
     } else {
         println!("🗄️  Connecting to ScyllaDB...");
         let nodes = vec!["127.0.0.1:9042"];
         
-        let repo = match db::ScyllaRepo::new(nodes).await {
+        let repo_concrete = match db::ScyllaRepo::new(nodes).await {
             Ok(r) => {
                 println!("✅ ScyllaDB connected");
-                r
+                Arc::new(r)
             }
             Err(e) => {
                 eprintln!("❌ ScyllaDB failed: {}", e);
@@ -67,7 +60,23 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
         
-        let state = Arc::new(sync::AppState { repo });
+        let repo_dyn: Arc<dyn sync::MessageRepo> = repo_concrete;
+        
+        println!("🔗 Setting up WebSocket + Redis...");
+        let ws_state = Arc::new(
+            websocket::WebSocketState::new(redis_url, repo_dyn.clone())
+                .await
+                .map_err(|e| format!("WebSocket state failed: {}", e))?
+        );
+        
+        let ws_state_clone = Arc::clone(&ws_state);
+        tokio::spawn(async move {
+            websocket::redis_subscriber_task(ws_state_clone).await;
+        });
+        
+        println!("✅ WebSocket + Redis ready");
+        
+        let state = Arc::new(sync::AppState { repo: repo_dyn });
         start_server(state, ws_state).await
     }
 }
@@ -84,15 +93,11 @@ async fn start_server<R: sync::MessageRepo + 'static>(
         .max_age(Duration::from_secs(3600));
     
     let app = Router::new()
-        // HTTP endpoints
         .route("/sync", axum::routing::post(sync::sync_handler))
         .route("/send", axum::routing::post(sync::send_handler))
         .with_state(state)
-        
-        // WebSocket endpoint
         .route("/ws", axum::routing::get(websocket::ws_handler))
         .with_state(ws_state)
-        
         .layer(cors);
     
     let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
