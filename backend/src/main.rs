@@ -1,4 +1,4 @@
-use backend::{sync, db};
+use backend::{sync, db, websocket};
 use axum::Router;
 use std::sync::Arc;
 use tower_http::cors::{CorsLayer, Any};
@@ -22,11 +22,36 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
         .parse::<bool>()
         .unwrap_or(false);
     
+    // ========================================================================
+    // SETUP WEBSOCKET (Redis Pub/Sub)
+    // ========================================================================
+    
+    let redis_url = "redis://127.0.0.1:6379";
+    
+    println!("🔗 Setting up WebSocket + Redis...");
+    let ws_state = Arc::new(
+        websocket::WebSocketState::new(redis_url)
+            .await
+            .map_err(|e| format!("WebSocket state failed: {}", e))?
+    );
+    
+    // Start Redis subscriber (background task)
+    let ws_state_clone = Arc::clone(&ws_state);
+    tokio::spawn(async move {
+        websocket::redis_subscriber_task(ws_state_clone).await;
+    });
+    
+    println!("✅ WebSocket + Redis ready");
+    
+    // ========================================================================
+    // SETUP DATABASE
+    // ========================================================================
+    
     if use_mock {
         println!("📦 MockRepo (In-Memory)");
         let repo = sync::MockRepo::new();
         let state = Arc::new(sync::AppState { repo });
-        start_server(state).await
+        start_server(state, ws_state).await
     } else {
         println!("🗄️  Connecting to ScyllaDB...");
         let nodes = vec!["127.0.0.1:9042"];
@@ -38,19 +63,18 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
             }
             Err(e) => {
                 eprintln!("❌ ScyllaDB failed: {}", e);
-                eprintln!("   Run: docker run -d -p 9042:9042 scylladb/scylla");
-                eprintln!("   Or: $env:USE_MOCK_DB=\"true\"");
                 return Err(Box::new(e));
             }
         };
         
         let state = Arc::new(sync::AppState { repo });
-        start_server(state).await
+        start_server(state, ws_state).await
     }
 }
 
 async fn start_server<R: sync::MessageRepo + 'static>(
-    state: Arc<sync::AppState<R>>
+    state: Arc<sync::AppState<R>>,
+    ws_state: Arc<websocket::WebSocketState>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -60,19 +84,27 @@ async fn start_server<R: sync::MessageRepo + 'static>(
         .max_age(Duration::from_secs(3600));
     
     let app = Router::new()
+        // HTTP endpoints
         .route("/sync", axum::routing::post(sync::sync_handler))
         .route("/send", axum::routing::post(sync::send_handler))
-        .layer(cors)
-        .with_state(state);
+        .with_state(state)
+        
+        // WebSocket endpoint
+        .route("/ws", axum::routing::get(websocket::ws_handler))
+        .with_state(ws_state)
+        
+        .layer(cors);
     
     let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
     
-    println!("🌐 HTTP Server (Dev Only)");
-    println!("   http://localhost:8080");
+    println!("🌐 Server Ready!");
+    println!("   HTTP: http://localhost:8080");
+    println!("   WebSocket: ws://localhost:8080/ws");
     println!("");
     println!("📡 Endpoints:");
-    println!("   POST /sync (read)");
+    println!("   POST /sync (polling)");
     println!("   POST /send (write)");
+    println!("   GET  /ws   (realtime)");
     println!("");
     println!("✅ Ready! Press Ctrl+C to stop");
     
