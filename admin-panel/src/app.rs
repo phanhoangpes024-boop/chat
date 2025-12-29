@@ -8,6 +8,10 @@ use web_sys::{WebSocket, MessageEvent, CloseEvent, ErrorEvent};
 use gloo_net::http::Request;
 use serde::{Deserialize, Serialize};
 
+// ===== API Configuration =====
+const API_BASE_URL: &str = "http://localhost:8080";
+const WS_BASE_URL: &str = "ws://localhost:8080";
+
 #[derive(Clone)]
 struct SendWebSocket(WebSocket);
 unsafe impl Send for SendWebSocket {}
@@ -74,7 +78,7 @@ pub fn App() -> impl IntoView {
                 admin_pin: pin,
             };
             
-            let result = Request::post("http://localhost:8080/auth")
+            let result = Request::post(&format!("{}/auth", API_BASE_URL))
                 .header("Content-Type", "application/octet-stream")
                 .body(req.encode_to_vec())
                 .unwrap()
@@ -241,7 +245,7 @@ fn Dashboard(
     
     // WebSocket connection
     Effect::new(move |_| {
-        let url = format!("ws://localhost:8080/ws?shop_id={}", shop_id_ws);
+        let url = format!("{}/ws?shop_id={}", WS_BASE_URL, shop_id_ws);
         let ws = match WebSocket::new(&url) {
             Ok(w) => w,
             Err(_) => return,

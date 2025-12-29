@@ -4,6 +4,9 @@ use prost::Message as ProstMessage;
 use wasm_bindgen::prelude::*;
 use web_sys::{WebSocket, MessageEvent};
 
+// ===== API Configuration =====
+const WS_BASE_URL: &str = "ws://localhost:8080";
+
 #[derive(Clone)]
 struct SendWs(WebSocket);
 unsafe impl Send for SendWs {}
@@ -40,7 +43,7 @@ pub fn Widget(shop_id: String) -> impl IntoView {
     
     // WebSocket connection
     Effect::new(move |_| {
-        let url = format!("ws://localhost:8080/ws?shop_id={}&guest_id={}", shop_id_ws, guest_id_val);
+        let url = format!("{}/ws?shop_id={}&guest_id={}", WS_BASE_URL, shop_id_ws, guest_id_val);
         let ws = match WebSocket::new(&url) {
             Ok(w) => w,
             Err(_) => return,
