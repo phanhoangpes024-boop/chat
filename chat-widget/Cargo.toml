@@ -1,0 +1,23 @@
+[package]
+name = "turbochat-widget"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+turbochat-shared = { path = "../shared" }
+leptos.workspace = true
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+console_error_panic_hook = "0.1"
+gloo-net = "0.6"
+prost = "0.13"
+crc32c = "0.6"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["KeyboardEvent", "Storage", "Window", "Document", "Element", "HtmlElement"] }
+uuid = { version = "1.0", features = ["v4", "js"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[profile.release]
+opt-level = "z"
+lto = true

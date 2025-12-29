@@ -1,0 +1,43 @@
+# Rust
+target/
+Cargo.lock
+**/*.rs.bk
+*.pdb
+
+# Frontend build outputs
+admin-panel/dist/
+admin-panel/.trunk/
+chat-widget/dist/
+chat-widget/.trunk/
+frontend-leptos/dist/
+frontend-leptos/.trunk/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Environment variables (SECRETS!)
+.env
+*.env
+.env.*
+turbochat-token.json
+
+# Certs
+*.pem
+*.key
+
+# Node modules (nếu sau này dùng)
+node_modules/
+
+# Temporary files
+*.tmp
+*.temp

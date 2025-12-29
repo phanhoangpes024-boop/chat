@@ -1,0 +1,72 @@
+syntax = "proto3";
+
+package turbochat.v1;
+
+// ============================================================================
+// MESSAGE - Tin nhắn (đã thêm shop_id, sender_type)
+// ============================================================================
+message Message {
+  string shop_id = 1;          // ID shop (thay vì chat_id)
+  fixed64 guest_id = 2;        // ID khách
+  fixed64 message_id = 3;      // ID tin nhắn
+  string sender_type = 4;      // "guest" hoặc "admin"
+  bytes content = 5;           // Nội dung
+  fixed64 timestamp_us = 6;    // Thời gian
+  fixed32 content_crc = 7;     // CRC32-C
+}
+
+// ============================================================================
+// GUEST - Thông tin khách (để hiển thị trên admin)
+// ============================================================================
+message Guest {
+  string shop_id = 1;
+  fixed64 guest_id = 2;
+  string guest_name = 3;
+  fixed64 created_at = 4;
+  fixed64 last_seen = 5;
+}
+
+// ============================================================================
+// SYNC - Lấy tin nhắn
+// ============================================================================
+message SyncRequest {
+  string shop_id = 1;
+  fixed64 guest_id = 2;
+  fixed64 after_message_id = 3;
+  uint32 limit = 4;
+}
+
+message SyncResponse {
+  repeated Message messages = 1;
+  fixed64 server_timestamp_us = 2;
+  bool has_more = 3;
+  fixed32 crc32 = 99;
+}
+
+// ============================================================================
+// GUEST LIST - Admin lấy danh sách khách
+// ============================================================================
+message GuestListRequest {
+  string shop_id = 1;
+  string admin_pin = 2;        // Xác thực admin
+}
+
+message GuestListResponse {
+  bool success = 1;
+  repeated Guest guests = 2;
+  string error = 3;
+}
+
+// ============================================================================
+// AUTH - Xác thực admin
+// ============================================================================
+message AdminAuthRequest {
+  string shop_id = 1;
+  string admin_pin = 2;
+}
+
+message AdminAuthResponse {
+  bool success = 1;
+  string shop_name = 2;
+  string error = 3;
+}

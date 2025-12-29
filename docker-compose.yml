@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  # ============================================================================
+  # REDIS - Message Broker (Pub/Sub)
+  # ============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: turbochat-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ============================================================================
+  # SCYLLADB - Database
+  # ============================================================================
+  scylla:
+    image: scylladb/scylla:latest
+    container_name: turbochat-scylla
+    ports:
+      - "9042:9042"
+    volumes:
+      - scylla_data:/var/lib/scylla
+    command: --smp 1 --memory 512M
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "cqlsh", "-e", "SELECT now() FROM system.local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  redis_data:
+  scylla_data:
+
+networks:
+  default:
+    name: turbochat_network

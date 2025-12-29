@@ -1,0 +1,18 @@
+[workspace]
+members = [
+    "backend",
+    "shared",
+    "admin-panel",
+    "chat-widget",
+]
+resolver = "2"
+
+[workspace.dependencies]
+prost = "0.13"
+prost-types = "0.13"
+prost-build = "0.13"
+bytes = "1.5"
+crc32c = "0.6"
+thiserror = "1.0"
+tokio = { version = "1", features = ["full"] }
+leptos = { version = "0.7", features = ["csr"] }
