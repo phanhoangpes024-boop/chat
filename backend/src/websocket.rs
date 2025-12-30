@@ -15,20 +15,19 @@ use crate::db::AstraRepo;
 #[derive(Deserialize)]
 pub struct WsQuery {
     pub shop_id: String,
-    pub guest_id: Option<u64>,
+    pub guest_id: Option<u64>,  // None = admin, Some = guest
 }
 
 pub struct WebSocketState {
-    pub redis_client: redis::Client,
+    pub redis_url: String,
     pub tx: broadcast::Sender<Vec<u8>>,
     pub repo: Arc<AstraRepo>,
 }
 
 impl WebSocketState {
-    pub async fn new(redis_url: &str, repo: Arc<AstraRepo>) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn new(redis_url: &str, repo: Arc<AstraRepo>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let (tx, _) = broadcast::channel(1000);
-        let redis_client = redis::Client::open(redis_url)?;
-        Ok(Self { redis_client, tx, repo })
+        Ok(Self { redis_url: redis_url.to_string(), tx, repo })
     }
 }
 
@@ -48,20 +47,19 @@ async fn handle_socket(socket: WebSocket, state: Arc<WebSocketState>, query: WsQ
     
     println!("✅ WebSocket connected: shop={}, guest={:?}", shop_id, guest_id);
     
+    // Subscribe Redis channel cho shop này
     let mut rx = state.tx.subscribe();
     
-    // Task gửi tin từ broadcast → Client
+    // Task gửi tin từ Redis → Client
     let shop_filter = shop_id.clone();
-    let guest_filter = guest_id;
     let mut send_task = tokio::spawn(async move {
         while let Ok(bytes) = rx.recv().await {
             if let Ok(msg) = ChatMessage::decode(&bytes[..]) {
                 if msg.shop_id == shop_filter {
                     // Guest chỉ nhận tin của mình, Admin nhận tất cả
-                    if guest_filter.is_none() || guest_filter == Some(msg.guest_id) {
+                    if guest_id.is_none() || guest_id == Some(msg.guest_id) {
                         println!("📤 Forwarding to client: {} bytes", bytes.len());
-                        if sender.send(WsMessage::Binary(bytes.into())).await.is_err() {
-                            println!("❌ Failed to send to client");
+                        if sender.send(WsMessage::Binary(bytes)).await.is_err() {
                             break;
                         }
                     }
@@ -75,72 +73,37 @@ async fn handle_socket(socket: WebSocket, state: Arc<WebSocketState>, query: WsQ
     let shop_id_clone = shop_id.clone();
     let mut recv_task = tokio::spawn(async move {
         println!("👂 Listening for messages from client...");
-        
-        while let Some(result) = receiver.next().await {
-            match result {
-                Ok(msg) => {
-                    println!("📩 Received WebSocket message: {:?}", msg_type(&msg));
+        while let Some(Ok(msg)) = receiver.next().await {
+            if let WsMessage::Binary(data) = msg {
+                println!("📩 Received WebSocket message: {:?}", "Binary");
+                println!("📦 Binary data: {} bytes", data.len());
+                
+                if let Ok(mut chat_msg) = ChatMessage::decode(&data[..]) {
+                    chat_msg.shop_id = shop_id_clone.clone();
+                    println!("💬 Message decoded: shop={}, guest={}, sender={}, content={:?}",
+                        chat_msg.shop_id, chat_msg.guest_id, chat_msg.sender_type,
+                        String::from_utf8_lossy(&chat_msg.content));
                     
-                    match msg {
-                        WsMessage::Binary(data) => {
-                            println!("📦 Binary data: {} bytes", data.len());
-                            
-                            match ChatMessage::decode(&data[..]) {
-                                Ok(mut chat_msg) => {
-                                    chat_msg.shop_id = shop_id_clone.clone();
-                                    println!("💬 Message decoded: shop={}, guest={}, sender={}, content={:?}", 
-                                        chat_msg.shop_id, 
-                                        chat_msg.guest_id, 
-                                        chat_msg.sender_type,
-                                        String::from_utf8_lossy(&chat_msg.content)
-                                    );
-                                    
-                                    // Upsert guest
-                                    if chat_msg.sender_type == "guest" {
-                                        let name = format!("Guest #{}", chat_msg.guest_id % 10000);
-                                        if let Err(e) = state_clone.repo.upsert_guest(&chat_msg.shop_id, chat_msg.guest_id, &name).await {
-                                            println!("⚠️ Upsert guest failed: {:?}", e);
-                                        }
-                                    }
-                                    
-                                    // Lưu DB
-                                    match state_clone.repo.insert_message(&chat_msg).await {
-                                        Ok(_) => println!("✅ Message saved to DB"),
-                                        Err(e) => {
-                                            println!("❌ DB insert failed: {:?}", e);
-                                            continue;
-                                        }
-                                    }
-                                    
-                                    // Publish Redis
-                                    match publish_to_redis(&state_clone, &chat_msg).await {
-                                        Ok(_) => println!("✅ Published to Redis"),
-                                        Err(e) => println!("❌ Redis publish failed: {:?}", e),
-                                    }
-                                }
-                                Err(e) => {
-                                    println!("❌ Protobuf decode failed: {:?}", e);
-                                }
-                            }
-                        }
-                        WsMessage::Text(text) => {
-                            println!("📝 Text message (unexpected): {}", text);
-                        }
-                        WsMessage::Ping(_) => println!("🏓 Ping"),
-                        WsMessage::Pong(_) => println!("🏓 Pong"),
-                        WsMessage::Close(_) => {
-                            println!("👋 Close frame received");
-                            break;
-                        }
+                    // Tạo/cập nhật guest nếu là guest
+                    if chat_msg.sender_type == "guest" {
+                        let name = format!("Guest #{}", chat_msg.guest_id % 10000);
+                        let _ = state_clone.repo.upsert_guest(&chat_msg.shop_id, chat_msg.guest_id, &name).await;
                     }
-                }
-                Err(e) => {
-                    println!("❌ WebSocket error: {:?}", e);
-                    break;
+                    
+                    // Lưu DB
+                    if let Err(e) = state_clone.repo.insert_message(&chat_msg).await {
+                        eprintln!("❌ DB insert failed: {:?}", e);
+                        continue;
+                    }
+                    println!("✅ Message saved to DB");
+                    
+                    // Publish Redis
+                    if let Err(e) = publish_to_redis(&state_clone, &chat_msg).await {
+                        eprintln!("❌ Redis publish failed: {:?}", e);
+                    }
                 }
             }
         }
-        println!("🔴 Client disconnected");
     });
 
     tokio::select! {
@@ -148,25 +111,17 @@ async fn handle_socket(socket: WebSocket, state: Arc<WebSocketState>, query: WsQ
         _ = (&mut recv_task) => send_task.abort(),
     }
     
-    println!("🔌 WebSocket handler finished: shop={}", shop_id);
-}
-
-fn msg_type(msg: &WsMessage) -> &'static str {
-    match msg {
-        WsMessage::Binary(_) => "Binary",
-        WsMessage::Text(_) => "Text",
-        WsMessage::Ping(_) => "Ping",
-        WsMessage::Pong(_) => "Pong",
-        WsMessage::Close(_) => "Close",
-    }
+    println!("🔌 WebSocket disconnected: shop={}", shop_id);
 }
 
 async fn publish_to_redis(state: &Arc<WebSocketState>, msg: &ChatMessage) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut conn = state.redis_client.get_multiplexed_async_connection().await?;
+    let client = redis::Client::open(state.redis_url.as_str())?;
+    let mut conn = client.get_multiplexed_async_connection().await?;
     let channel = format!("chat:{}", msg.shop_id);
     let payload = msg.encode_to_vec();
     println!("📡 Publishing to channel: {}", channel);
     conn.publish::<_, _, ()>(&channel, &payload).await?;
+    println!("✅ Published to Redis");
     Ok(())
 }
 
@@ -174,41 +129,43 @@ pub async fn redis_subscriber_task(state: Arc<WebSocketState>) {
     println!("🔔 Redis subscriber starting...");
     
     loop {
-        match state.redis_client.get_async_pubsub().await {
-            Ok(mut pubsub) => {
-                if let Err(e) = pubsub.psubscribe("chat:*").await {
-                    println!("❌ Redis psubscribe error: {:?}", e);
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                    continue;
-                }
-                
-                println!("✅ Redis subscribed to chat:*");
-                
-                let mut stream = pubsub.on_message();
-                
-                loop {
-                    match stream.next().await {
-                        Some(msg) => {
-                            let channel: String = msg.get_channel_name().to_string();
-                            if let Ok(payload) = msg.get_payload::<Vec<u8>>() {
-                                println!("📬 Redis received on {}: {} bytes", channel, payload.len());
-                                match state.tx.send(payload) {
-                                    Ok(n) => println!("📢 Broadcast to {} receivers", n),
-                                    Err(_) => println!("⚠️ No receivers"),
-                                }
-                            }
-                        }
-                        None => {
-                            println!("⚠️ Redis stream ended, reconnecting...");
-                            break;
-                        }
-                    }
-                }
+        match run_redis_subscriber(&state).await {
+            Ok(_) => {
+                println!("⚠️ Redis stream ended, reconnecting...");
             }
             Err(e) => {
-                println!("❌ Redis pubsub error: {:?}", e);
-                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                eprintln!("❌ Redis pubsub error: {:?}", e);
             }
         }
+        // Đợi 2 giây trước khi reconnect
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     }
+}
+
+async fn run_redis_subscriber(state: &Arc<WebSocketState>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let client = redis::Client::open(state.redis_url.as_str())?;
+    
+    // Dùng get_async_pubsub() cho redis 0.27+
+    let mut pubsub = client.get_async_pubsub().await?;
+    
+    // Subscribe pattern chat:*
+    pubsub.psubscribe("chat:*").await?;
+    println!("✅ Redis subscribed to chat:*");
+    
+    // Lấy stream từ pubsub
+    let mut stream = pubsub.on_message();
+    
+    while let Some(msg) = stream.next().await {
+        let channel: String = msg.get_channel()?;
+        let payload: Vec<u8> = msg.get_payload()?;
+        
+        println!("📬 Redis received on {}: {} bytes", channel, payload.len());
+        
+        let receiver_count = state.tx.receiver_count();
+        println!("📢 Broadcast to {} receivers", receiver_count);
+        
+        let _ = state.tx.send(payload);
+    }
+    
+    Ok(())
 }

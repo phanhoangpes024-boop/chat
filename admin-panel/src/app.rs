@@ -1,16 +1,12 @@
 use leptos::prelude::*;
 use leptos::html::Div;
-use turbochat_shared::{Message as ChatMessage, AdminAuthRequest, AdminAuthResponse};
+use turbochat_shared::{Message as ChatMessage, AdminAuthRequest, AdminAuthResponse, SyncRequest, SyncResponse, GuestListRequest, GuestListResponse};
 use prost::Message as ProstMessage;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 use web_sys::{WebSocket, MessageEvent, CloseEvent, ErrorEvent};
 use gloo_net::http::Request;
-use serde::{Deserialize, Serialize};
-
-// ===== API Configuration =====
-const API_BASE_URL: &str = "http://localhost:8080";
-const WS_BASE_URL: &str = "ws://localhost:8080";
+use std::collections::HashMap;
 
 #[derive(Clone)]
 struct SendWebSocket(WebSocket);
@@ -25,11 +21,13 @@ struct ChatUser {
     time: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]  // ← THÊM PartialEq cho Memo
 struct DisplayMessage {
+    id: u64,
     sender_type: String,
     text: String,
     time: String,
+    guest_id: u64,
 }
 
 #[component]
@@ -38,23 +36,25 @@ pub fn App() -> impl IntoView {
     let (is_logged_in, set_is_logged_in) = signal(false);
     let (shop_id, set_shop_id) = signal(String::new());
     let (shop_name, set_shop_name) = signal(String::new());
+    let (admin_pin, set_admin_pin) = signal(String::new());  // ← LƯU PIN
     let (pin_input, set_pin_input) = signal(String::new());
     let (shop_id_input, set_shop_id_input) = signal(String::new());
     let (login_error, set_login_error) = signal(String::new());
     let (is_loading, set_is_loading) = signal(false);
 
-    // Check URL params hoặc localStorage
+    // Check localStorage khi load
     Effect::new(move |_| {
         let window = web_sys::window().unwrap();
         let storage = window.local_storage().unwrap().unwrap();
         
-        // Kiểm tra đã login chưa
-        if let (Some(saved_shop), Some(saved_name)) = (
+        if let (Some(saved_shop), Some(saved_name), Some(saved_pin)) = (
             storage.get_item("turbochat_admin_shop").ok().flatten(),
-            storage.get_item("turbochat_admin_name").ok().flatten()
+            storage.get_item("turbochat_admin_name").ok().flatten(),
+            storage.get_item("turbochat_admin_pin").ok().flatten()  // ← LOAD PIN
         ) {
             set_shop_id.set(saved_shop);
             set_shop_name.set(saved_name);
+            set_admin_pin.set(saved_pin);
             set_is_logged_in.set(true);
         }
     });
@@ -72,13 +72,14 @@ pub fn App() -> impl IntoView {
         set_is_loading.set(true);
         set_login_error.set(String::new());
         
+        let pin_clone = pin.clone();  // ← CLONE ĐỂ LƯU
         spawn_local(async move {
             let req = AdminAuthRequest {
                 shop_id: shop.clone(),
-                admin_pin: pin,
+                admin_pin: pin_clone.clone(),
             };
             
-            let result = Request::post(&format!("{}/auth", API_BASE_URL))
+            let result = Request::post("http://localhost:8080/auth")
                 .header("Content-Type", "application/octet-stream")
                 .body(req.encode_to_vec())
                 .unwrap()
@@ -92,14 +93,15 @@ pub fn App() -> impl IntoView {
                     if let Ok(bytes) = resp.binary().await {
                         if let Ok(auth_resp) = AdminAuthResponse::decode(&bytes[..]) {
                             if auth_resp.success {
-                                // Lưu session
                                 let window = web_sys::window().unwrap();
                                 let storage = window.local_storage().unwrap().unwrap();
                                 let _ = storage.set_item("turbochat_admin_shop", &shop);
                                 let _ = storage.set_item("turbochat_admin_name", &auth_resp.shop_name);
+                                let _ = storage.set_item("turbochat_admin_pin", &pin_clone);  // ← LƯU PIN
                                 
                                 set_shop_id.set(shop);
                                 set_shop_name.set(auth_resp.shop_name);
+                                set_admin_pin.set(pin_clone);  // ← SET PIN STATE
                                 set_is_logged_in.set(true);
                             } else {
                                 set_login_error.set(auth_resp.error);
@@ -120,27 +122,32 @@ pub fn App() -> impl IntoView {
         let storage = window.local_storage().unwrap().unwrap();
         let _ = storage.remove_item("turbochat_admin_shop");
         let _ = storage.remove_item("turbochat_admin_name");
+        let _ = storage.remove_item("turbochat_admin_pin");  // ← XÓA PIN
         set_is_logged_in.set(false);
         set_shop_id.set(String::new());
         set_shop_name.set(String::new());
+        set_admin_pin.set(String::new());
     };
 
     view! {
         <Show 
             when=move || is_logged_in.get()
-            fallback=move || view! { <LoginPage 
-                shop_id_input=shop_id_input
-                set_shop_id_input=set_shop_id_input
-                pin_input=pin_input
-                set_pin_input=set_pin_input
-                login_error=login_error
-                is_loading=is_loading
-                on_login=do_login
-            /> }
+            fallback=move || view! { 
+                <LoginPage 
+                    shop_id_input=shop_id_input
+                    set_shop_id_input=set_shop_id_input
+                    pin_input=pin_input
+                    set_pin_input=set_pin_input
+                    login_error=login_error
+                    is_loading=is_loading
+                    on_login=do_login
+                /> 
+            }
         >
             <Dashboard 
                 shop_id=shop_id.get() 
                 shop_name=shop_name.get()
+                admin_pin=admin_pin.get()
                 on_logout=do_logout
             />
         </Show>
@@ -148,7 +155,7 @@ pub fn App() -> impl IntoView {
 }
 
 // ============================================================================
-// LOGIN PAGE
+// LOGIN PAGE - GIỮ NGUYÊN
 // ============================================================================
 #[component]
 fn LoginPage(
@@ -223,17 +230,19 @@ fn LoginPage(
 }
 
 // ============================================================================
-// DASHBOARD (Chat interface)
+// DASHBOARD - SỬA ĐỂ LỌC TIN NHẮN THEO GUEST
 // ============================================================================
 #[component]
 fn Dashboard(
     shop_id: String,
     shop_name: String,
+    admin_pin: String,  // ← THÊM PIN
     on_logout: impl Fn() + 'static + Clone,
 ) -> impl IntoView {
     let (chat_users, set_chat_users) = signal(Vec::<ChatUser>::new());
     let (current_guest_id, set_current_guest_id) = signal(0u64);
-    let (messages, set_messages) = signal(Vec::<DisplayMessage>::new());
+    // SỬA: Dùng HashMap để lưu tin theo từng guest
+    let (all_messages, set_all_messages) = signal(HashMap::<u64, Vec<DisplayMessage>>::new());
     let (message_input, set_message_input) = signal(String::new());
     let (connection_status, set_connection_status) = signal("🔴 Đang kết nối...".to_string());
     let (send_trigger, set_send_trigger) = signal(0u64);
@@ -241,16 +250,69 @@ fn Dashboard(
     let scrollable_ref = NodeRef::<Div>::new();
     let ws_ref = StoredValue::new(None::<SendWebSocket>);
 
-    let shop_id_ws = shop_id.clone();
-    
-    // WebSocket connection
+    // SỬA: Memo để lấy tin nhắn của guest đang chọn
+    let current_messages = Memo::new(move |_| {
+        let gid = current_guest_id.get();
+        if gid == 0 { return Vec::new(); }
+        all_messages.get().get(&gid).cloned().unwrap_or_default()
+    });
+
+    // ============================================================
+    // THÊM MỚI: Load danh sách guests từ DB khi khởi động
+    // ============================================================
+    let shop_id_guests = shop_id.clone();
+    let pin_for_guests = admin_pin.clone();  // ← DÙNG PIN THẬT
     Effect::new(move |_| {
-        let url = format!("{}/ws?shop_id={}", WS_BASE_URL, shop_id_ws);
+        let shop = shop_id_guests.clone();
+        let pin = pin_for_guests.clone();
+        spawn_local(async move {
+            let req = GuestListRequest { 
+                shop_id: shop, 
+                admin_pin: pin,  // ← DÙNG PIN THẬT
+            };
+            
+            if let Ok(resp) = Request::post("http://localhost:8080/guests")
+                .header("Content-Type", "application/octet-stream")
+                .body(req.encode_to_vec())
+                .unwrap()
+                .send()
+                .await 
+            {
+                if let Ok(bytes) = resp.binary().await {
+                    if let Ok(list) = GuestListResponse::decode(&bytes[..]) {
+                        if list.success {
+                            leptos::logging::log!("📥 Loaded {} guests", list.guests.len());
+                            for guest in list.guests {
+                                set_chat_users.update(|users| {
+                                    if !users.iter().any(|u| u.guest_id == guest.guest_id) {
+                                        users.push(ChatUser {
+                                            guest_id: guest.guest_id,
+                                            name: guest.guest_name,
+                                            last_message: String::new(),
+                                            time: String::new(),
+                                        });
+                                    }
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    });
+
+    // ============================================================
+    // WebSocket connection
+    // ============================================================
+    let shop_id_ws = shop_id.clone();
+    Effect::new(move |_| {
+        let url = format!("ws://localhost:8080/ws?shop_id={}", shop_id_ws);
         let ws = match WebSocket::new(&url) {
             Ok(w) => w,
             Err(_) => return,
         };
         
+        // On open
         {
             let on_open = Closure::wrap(Box::new(move |_: JsValue| {
                 set_connection_status.set("🟢 Đã kết nối".to_string());
@@ -259,6 +321,7 @@ fn Dashboard(
             on_open.forget();
         }
         
+        // On message
         {
             let on_message = Closure::wrap(Box::new(move |event: MessageEvent| {
                 if let Ok(blob) = event.data().dyn_into::<web_sys::Blob>() {
@@ -271,27 +334,39 @@ fn Dashboard(
                             
                             if let Ok(msg) = ChatMessage::decode(&bytes[..]) {
                                 let guest_id = msg.guest_id;
+                                let msg_id = msg.message_id;
+                                let text = String::from_utf8_lossy(&msg.content).to_string();
+                                let time = format_time(msg.timestamp_us);
                                 
+                                // Cập nhật chat_users
                                 set_chat_users.update(|users| {
                                     if !users.iter().any(|u| u.guest_id == guest_id) {
                                         users.push(ChatUser {
                                             guest_id,
                                             name: format!("Khách #{}", guest_id % 10000),
-                                            last_message: String::from_utf8_lossy(&msg.content).to_string(),
-                                            time: format_time(msg.timestamp_us),
+                                            last_message: text.clone(),
+                                            time: time.clone(),
                                         });
                                     } else if let Some(user) = users.iter_mut().find(|u| u.guest_id == guest_id) {
-                                        user.last_message = String::from_utf8_lossy(&msg.content).to_string();
-                                        user.time = format_time(msg.timestamp_us);
+                                        user.last_message = text.clone();
+                                        user.time = time.clone();
                                     }
                                 });
                                 
-                                set_messages.update(|msgs| {
-                                    msgs.push(DisplayMessage {
-                                        sender_type: msg.sender_type.clone(),
-                                        text: String::from_utf8_lossy(&msg.content).to_string(),
-                                        time: format_time(msg.timestamp_us),
-                                    });
+                                // SỬA: Thêm tin vào HashMap theo guest_id
+                                let dm = DisplayMessage {
+                                    id: msg_id,
+                                    sender_type: msg.sender_type.clone(),
+                                    text,
+                                    time,
+                                    guest_id,
+                                };
+                                
+                                set_all_messages.update(|map| {
+                                    let msgs = map.entry(guest_id).or_insert_with(Vec::new);
+                                    if !msgs.iter().any(|m| m.id == msg_id) {
+                                        msgs.push(dm);
+                                    }
                                 });
                             }
                         }
@@ -306,6 +381,7 @@ fn Dashboard(
             on_message.forget();
         }
         
+        // On close
         {
             let on_close = Closure::wrap(Box::new(move |_: CloseEvent| {
                 set_connection_status.set("🟡 Mất kết nối".to_string());
@@ -315,6 +391,56 @@ fn Dashboard(
         }
         
         ws_ref.set_value(Some(SendWebSocket(ws)));
+    });
+
+    // ============================================================
+    // THÊM MỚI: Load tin nhắn cũ khi chọn guest
+    // ============================================================
+    let shop_id_sync = shop_id.clone();
+    Effect::new(move |_| {
+        let gid = current_guest_id.get();
+        if gid == 0 { return; }
+        
+        let shop = shop_id_sync.clone();
+        leptos::logging::log!("📥 Loading messages for guest {}", gid);
+        spawn_local(async move {
+            let req = SyncRequest {
+                shop_id: shop,
+                guest_id: gid,
+                after_message_id: 0,
+                limit: 50,
+            };
+            
+            if let Ok(resp) = Request::post("http://localhost:8080/sync")
+                .header("Content-Type", "application/octet-stream")
+                .body(req.encode_to_vec())
+                .unwrap()
+                .send()
+                .await 
+            {
+                if let Ok(bytes) = resp.binary().await {
+                    if let Ok(sync) = SyncResponse::decode(&bytes[..]) {
+                        leptos::logging::log!("📥 Loaded {} messages for guest {}", sync.messages.len(), gid);
+                        set_all_messages.update(|map| {
+                            let msgs = map.entry(gid).or_insert_with(Vec::new);
+                            for msg in sync.messages {
+                                if !msgs.iter().any(|m| m.id == msg.message_id) {
+                                    msgs.push(DisplayMessage {
+                                        id: msg.message_id,
+                                        sender_type: msg.sender_type,
+                                        text: String::from_utf8_lossy(&msg.content).to_string(),
+                                        time: format_time(msg.timestamp_us),
+                                        guest_id: gid,
+                                    });
+                                }
+                            }
+                            // Sort theo message_id
+                            msgs.sort_by_key(|m| m.id);
+                        });
+                    }
+                }
+            }
+        });
     });
 
     // Send message effect
@@ -354,7 +480,7 @@ fn Dashboard(
 
     // Auto-scroll
     Effect::new(move |_| {
-        messages.get();
+        let _ = current_messages.get();
         request_animation_frame(move || {
             if let Some(div) = scrollable_ref.get_untracked() {
                 div.set_scroll_top(div.scroll_height());
@@ -369,6 +495,7 @@ fn Dashboard(
         <style>{include_str!("../telegram_style.css")}</style>
 
         <div class="app-container">
+            // SIDEBAR
             <div class="sidebar">
                 <div class="sidebar-header">
                     <div class="shop-info">
@@ -381,6 +508,7 @@ fn Dashboard(
                     <Show when=move || chat_users.get().is_empty()>
                         <div class="empty-state">"Chưa có khách nào nhắn tin"</div>
                     </Show>
+                    
                     <For
                         each=move || chat_users.get()
                         key=|chat| chat.guest_id
@@ -389,8 +517,11 @@ fn Dashboard(
                             let is_active = move || current_guest_id.get() == guest_id;
                             
                             view! {
-                                <div class="chat-item" class:active=is_active
-                                    on:click=move |_| set_current_guest_id.set(guest_id)>
+                                <div 
+                                    class="chat-item" 
+                                    class:active=is_active
+                                    on:click=move |_| set_current_guest_id.set(guest_id)
+                                >
                                     <div class="avatar green">"K"</div>
                                     <div class="chat-info">
                                         <div class="chat-header">
@@ -406,6 +537,7 @@ fn Dashboard(
                 </div>
             </div>
 
+            // CHAT AREA
             <div class="chat-area">
                 <div class="chat-header-bar">
                     <div class="chat-header-info">
@@ -423,10 +555,14 @@ fn Dashboard(
                 <div class="scrollable-content" node_ref=scrollable_ref>
                     <div class="messages-container">
                         <For
-                            each=move || messages.get()
-                            key=|msg| format!("{}{}", msg.time, msg.text)
+                            each=move || current_messages.get()
+                            key=|msg| msg.id
                             children=move |msg: DisplayMessage| {
-                                let class = if msg.sender_type == "admin" { "message sent" } else { "message received" };
+                                let class = if msg.sender_type == "admin" { 
+                                    "message sent" 
+                                } else { 
+                                    "message received" 
+                                };
                                 view! {
                                     <div class=class>
                                         <div class="message-bubble">
@@ -442,7 +578,10 @@ fn Dashboard(
 
                 <div class="input-area">
                     <div class="input-bubble">
-                        <input type="text" class="message-input" placeholder="Nhập tin nhắn..."
+                        <input 
+                            type="text" 
+                            class="message-input" 
+                            placeholder="Nhập tin nhắn..."
                             disabled=move || current_guest_id.get() == 0
                             prop:value=move || message_input.get()
                             on:input=move |e| set_message_input.set(event_target_value(&e))
@@ -452,10 +591,13 @@ fn Dashboard(
                                 } 
                             }
                         />
-                        <button class="send-button" 
+                        <button 
+                            class="send-button" 
                             disabled=move || current_guest_id.get() == 0
                             on:click=move |_| set_send_trigger.set(js_sys::Date::now() as u64)
-                        >"➤"</button>
+                        >
+                            "➤"
+                        </button>
                     </div>
                 </div>
             </div>

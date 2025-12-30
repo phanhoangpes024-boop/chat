@@ -2,6 +2,7 @@ use crate::contract::{ContractError, Message, Guest};
 use bytes::Bytes;
 use reqwest::Client;
 use serde_json::json;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
 pub struct AstraRepo {
     client: Client,
@@ -125,8 +126,8 @@ impl AstraRepo {
     pub async fn insert_message(&self, msg: &Message) -> Result<(), ContractError> {
         let url = format!("{}/messages", self.base_url);
         
-        // Convert bytes to base64 for JSON
-        let content_base64 = base64::encode(&msg.content);
+        // Base64 mới (không deprecated)
+        let content_base64 = BASE64.encode(&msg.content);
         
         let payload = json!({
             "shop_id": msg.shop_id,
@@ -175,9 +176,9 @@ impl AstraRepo {
         let mut messages = Vec::new();
         if let Some(rows) = body["data"].as_array() {
             for row in rows {
-                // Decode base64 content back to bytes
+                // Base64 decode mới
                 let content_b64 = row["content"].as_str().unwrap_or("");
-                let content_bytes = base64::decode(content_b64)
+                let content_bytes = BASE64.decode(content_b64)
                     .map_err(|e| ContractError::DbError(format!("Base64 decode failed: {}", e)))?;
 
                 messages.push(Message {

@@ -18,10 +18,17 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 dotenvy = "0.15"
 reqwest = { version = "0.11", features = ["json"] }
-base64 = "0.21"
-# Redis Pub/Sub
-redis = { version = "0.27", features = ["aio", "tokio-comp", "tokio-native-tls-comp"] }
-# WebSocket
+
+# Base64 mới (không deprecated)
+base64 = "0.22"
+
+# Redis MỚI với đầy đủ features cho Upstash TLS
+redis = { version = "0.27", features = [
+    "aio",
+    "tokio-comp",
+    "tokio-native-tls-comp"
+] }
+
 futures = "0.3"
 
 [build-dependencies]
